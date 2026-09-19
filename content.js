@@ -59,8 +59,11 @@
       position: fixed;
       right: 20px;
       bottom: 20px;
-      width: 390px;
-      max-height: min(720px, calc(100vh - 40px));
+      width: min(390px, calc(100vw - 40px));
+      height: min(720px, calc(100vh - 40px));
+      max-height: calc(100vh - 40px);
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
       z-index: 2147483647;
       color: ${COLORS.text};
@@ -95,9 +98,24 @@
     #__devlens_close:hover { background: #242936; color: white; }
 
     #__devlens_content {
+      flex: 1 1 auto;
+      min-height: 0;
       overflow-y: auto;
-      max-height: calc(min(720px, 100vh - 40px) - 58px);
+      overflow-x: hidden;
       padding: 12px;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
+
+    @media (max-width: 520px) {
+      #__devlens_panel {
+        right: 10px;
+        left: 10px;
+        bottom: 10px;
+        width: auto;
+        height: calc(100vh - 20px);
+        max-height: calc(100vh - 20px);
+      }
     }
 
     .devlens-section {
