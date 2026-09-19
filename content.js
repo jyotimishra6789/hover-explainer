@@ -1,422 +1,734 @@
-// Hover Explainer content script.
-// Injected each time the toolbar button is clicked; after the first run it just toggles.
 (() => {
-  if (window.__hoverExplainer) { window.__hoverExplainer.toggle(); return; }
+  if (window.__devLensInjected) {
+    window.__devLensInjected = false;
+    location.reload();
+    return;
+  }
 
-  let active = false, locked = null, hovered = null, raf = 0, lastTarget = null;
+  window.__devLensInjected = true;
 
-  // ---------- tiny DOM helper (never uses innerHTML: page strings are untrusted) ----------
-  const h = (tag, props = {}, ...kids) => {
-    const n = document.createElement(tag);
-    for (const [k, v] of Object.entries(props)) {
-      if (k === 'class') n.className = v;
-      else if (k === 'text') n.textContent = v;
-      else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
-      else n.setAttribute(k, v);
-    }
-    n.append(...kids);
-    return n;
+  const state = {
+    locked: false,
+    currentElement: null,
+    currentAnalysis: null
   };
 
-  // ---------- overlay UI in a shadow root so page CSS can't touch it ----------
-  const CSS = `
-    *{box-sizing:border-box}
-    .box{position:fixed;pointer-events:none;background:rgba(47,91,234,.14);outline:2px solid #2f5bea}
-    .parent{position:fixed;pointer-events:none;outline:2px dashed #d6336c;outline-offset:-1px}
-    .tag{position:fixed;pointer-events:none;font:12px/1.3 ui-monospace,Menlo,Consolas,monospace;background:#1b2333;color:#fff;
-      padding:4px 8px;border-radius:4px;max-width:440px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .panel{position:fixed;top:16px;width:370px;max-height:calc(100vh - 32px);overflow:auto;pointer-events:auto;
-      background:#fbfbfd;color:#1b2333;border:1px solid #cfd6e4;border-radius:10px;
-      box-shadow:0 12px 32px rgba(20,30,60,.22);font:13px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}
-    .head{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #e1e6f0;
-      position:sticky;top:0;background:#fbfbfd}
-    .name{font:600 12px ui-monospace,Menlo,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .x{border:0;background:none;font-size:18px;line-height:1;cursor:pointer;color:#55627d;padding:2px 6px}
-    .body{padding:4px 14px 14px}
-    .summary{font-size:14px;margin:10px 0 2px}
-    h4{font-size:12px;font-weight:600;color:#55627d;margin:14px 0 4px}
-    p{margin:3px 0}
-    code,pre{font:12px/1.45 ui-monospace,Menlo,Consolas,monospace}
-    code{background:#eef1f8;padding:1px 4px;border-radius:3px}
-    pre{background:#eef1f8;padding:6px 8px;border-radius:6px;margin:4px 0;white-space:pre-wrap;word-break:break-word;max-height:140px;overflow:auto}
-    .rule{margin:6px 0}.rule b{font:600 12px ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
-    .rule small{color:#55627d;margin-left:6px}
-    .note{color:#55627d;font-size:12px}
-    button.ai{margin-top:6px;background:#2f5bea;color:#fff;border:0;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}
-    button.ai:disabled{opacity:.6;cursor:wait}
-    button.link{background:none;border:0;color:#2f5bea;text-decoration:underline;cursor:pointer;font:inherit;padding:0}
-    .ai-out{white-space:pre-wrap;margin-top:8px}
+  const COLORS = {
+    accent: "#8b5cf6",
+    accentSoft: "rgba(139, 92, 246, 0.12)",
+    panel: "#0f1117",
+    panel2: "#171a23",
+    border: "#2a2f3a",
+    text: "#f5f7fb",
+    muted: "#9ca3af",
+    detected: "#22c55e",
+    inferred: "#60a5fa",
+    unknown: "#f59e0b"
+  };
+
+  const style = document.createElement("style");
+  style.id = "__devlens_styles";
+  style.textContent = `
+    #__devlens_highlight {
+      position: fixed;
+      pointer-events: none;
+      z-index: 2147483645;
+      display: none;
+      border: 2px solid ${COLORS.accent};
+      background: ${COLORS.accentSoft};
+      box-sizing: border-box;
+      transition: left .08s ease, top .08s ease, width .08s ease, height .08s ease;
+    }
+
+    #__devlens_tooltip {
+      position: fixed;
+      z-index: 2147483646;
+      display: none;
+      pointer-events: none;
+      background: ${COLORS.panel};
+      color: ${COLORS.text};
+      border: 1px solid ${COLORS.border};
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-shadow: 0 8px 30px rgba(0,0,0,.28);
+      max-width: 360px;
+    }
+
+    #__devlens_panel {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: 390px;
+      max-height: min(720px, calc(100vh - 40px));
+      overflow: hidden;
+      z-index: 2147483647;
+      color: ${COLORS.text};
+      background: ${COLORS.panel};
+      border: 1px solid ${COLORS.border};
+      border-radius: 14px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.42);
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #__devlens_panel * { box-sizing: border-box; }
+    #__devlens_header {
+      padding: 13px 14px;
+      border-bottom: 1px solid ${COLORS.border};
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: ${COLORS.panel2};
+    }
+    #__devlens_title { font-weight: 700; font-size: 14px; }
+    #__devlens_subtitle { color: ${COLORS.muted}; font-size: 11px; margin-top: 2px; }
+    #__devlens_close {
+      width: 28px;
+      height: 28px;
+      border: 0;
+      border-radius: 7px;
+      color: ${COLORS.muted};
+      background: transparent;
+      cursor: pointer;
+      font-size: 18px;
+    }
+    #__devlens_close:hover { background: #242936; color: white; }
+
+    #__devlens_content {
+      overflow-y: auto;
+      max-height: calc(min(720px, 100vh - 40px) - 58px);
+      padding: 12px;
+    }
+
+    .devlens-section {
+      margin-bottom: 12px;
+      border: 1px solid ${COLORS.border};
+      border-radius: 10px;
+      overflow: hidden;
+      background: #12151c;
+    }
+
+    .devlens-section-head {
+      padding: 9px 10px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: #171a23;
+    }
+
+    .devlens-section-body { padding: 10px; }
+    .devlens-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255,255,255,.05);
+    }
+    .devlens-row:last-child { border-bottom: 0; }
+    .devlens-key { color: ${COLORS.muted}; }
+    .devlens-value { color: ${COLORS.text}; text-align: right; word-break: break-word; }
+
+    .devlens-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .devlens-detected { background: rgba(34,197,94,.12); color: ${COLORS.detected}; }
+    .devlens-inferred { background: rgba(96,165,250,.12); color: ${COLORS.inferred}; }
+    .devlens-unknown { background: rgba(245,158,11,.12); color: ${COLORS.unknown}; }
+
+    .devlens-code {
+      margin: 7px 0 0;
+      padding: 9px;
+      overflow-x: auto;
+      background: #0b0d12;
+      border: 1px solid ${COLORS.border};
+      border-radius: 7px;
+      color: #dbe2f0;
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .devlens-muted { color: ${COLORS.muted}; }
+    .devlens-explanation { color: #e5e7eb; }
+    .devlens-button {
+      width: 100%;
+      border: 1px solid ${COLORS.border};
+      border-radius: 8px;
+      padding: 9px 10px;
+      margin-top: 8px;
+      background: #1a1e28;
+      color: ${COLORS.text};
+      cursor: pointer;
+      text-align: left;
+    }
+    .devlens-button:hover { background: #222735; }
   `;
-  const host = h('div', { id: 'hover-explainer-host' });
-  host.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
-  const root = host.attachShadow({ mode: 'open' });
-  try {
-    const sheet = new CSSStyleSheet(); // constructable sheets aren't blocked by page CSP
-    sheet.replaceSync(CSS);
-    root.adoptedStyleSheets = [sheet];
-  } catch { root.append(h('style', { text: CSS })); }
-  const parentBox = h('div', { class: 'parent' });
-  const box = h('div', { class: 'box' });
-  const tag = h('div', { class: 'tag' });
-  const panel = h('aside', { class: 'panel' });
-  root.append(parentBox, box, tag, panel);
-  [parentBox, box, tag, panel].forEach((n) => (n.style.display = 'none'));
+  document.documentElement.appendChild(style);
 
-  // ---------- helpers ----------
-  const clip = (s, n = 240) => { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; };
-  const px = (v) => Math.round(parseFloat(v) * 10) / 10;
-  const sides = (cs, p, suffix = '') => ['Top', 'Right', 'Bottom', 'Left'].map((s) => px(cs[p + s + suffix]));
-  const fmtSides = (a) => (a.every((v) => v === a[0]) ? a[0] + 'px' : a.map((v) => v + 'px').join(' '));
-  const label = (el) => {
-    let s = el.tagName.toLowerCase();
-    if (el.id) s += '#' + el.id;
-    const c = [...el.classList].slice(0, 3);
-    if (c.length) s += '.' + c.join('.');
-    return clip(s, 70);
-  };
-  const posAncestor = (el) => {
-    for (let p = el.parentElement; p; p = p.parentElement) {
-      if (getComputedStyle(p).position !== 'static') return p;
-    }
-    return document.documentElement;
-  };
+  const highlight = document.createElement("div");
+  highlight.id = "__devlens_highlight";
+  document.documentElement.appendChild(highlight);
 
-  const TAGS = {
-    div: 'a generic block container', span: 'a generic inline wrapper', a: 'a link', button: 'a button', img: 'an image',
-    p: 'a paragraph', ul: 'an unordered list', ol: 'an ordered list', li: 'a list item', nav: 'a navigation area',
-    header: 'a header area', footer: 'a footer area', main: 'the main content area', section: 'a section of content',
-    article: 'a self-contained article', aside: 'a side area', form: 'a form', input: 'an input field', label: 'a form label',
-    select: 'a dropdown', textarea: 'a multi-line text field', table: 'a table', tr: 'a table row', td: 'a table cell',
-    th: 'a table header cell', svg: 'a vector graphic', canvas: 'a drawing surface (canvas)', video: 'a video player',
-    iframe: 'an embedded page', code: 'inline code', pre: 'preformatted text', h1: 'a top-level heading', h2: 'a heading',
-    h3: 'a heading', h4: 'a heading', h5: 'a heading', h6: 'a heading', body: 'the page body', html: 'the root of the document'
-  };
+  const tooltip = document.createElement("div");
+  tooltip.id = "__devlens_tooltip";
+  document.documentElement.appendChild(tooltip);
 
-  const JUSTIFY = {
-    'flex-start': 'packed at the start', start: 'packed at the start', center: 'centered', 'flex-end': 'packed at the end',
-    end: 'packed at the end', 'space-between': 'spread out with equal gaps between them',
-    'space-around': 'spread out with space around each', 'space-evenly': 'spread out with equal space everywhere'
-  };
-  const ALIGN = {
-    center: 'centered', 'flex-start': 'aligned to the start', start: 'aligned to the start', 'flex-end': 'aligned to the end',
-    end: 'aligned to the end', baseline: 'aligned on their text baselines'
-  };
+  const panel = document.createElement("div");
+  panel.id = "__devlens_panel";
+  panel.innerHTML = `
+    <div id="__devlens_header">
+      <div>
+        <div id="__devlens_title">DevLens</div>
+        <div id="__devlens_subtitle">Hover an element · click to lock</div>
+      </div>
+      <button id="__devlens_close" title="Close inspector">×</button>
+    </div>
+    <div id="__devlens_content">
+      <div class="devlens-muted">Move your cursor over a webpage element.</div>
+    </div>
+  `;
+  document.documentElement.appendChild(panel);
 
-  // ---------- ask the page's own JS world about frameworks and handlers ----------
-  function probe(el) {
-    try {
-      el.dispatchEvent(new CustomEvent('hx-probe'));
-      const raw = el.getAttribute('data-hx-info');
-      el.removeAttribute('data-hx-info');
-      return raw ? JSON.parse(raw) : {};
-    } catch { return {}; }
+  const content = panel.querySelector("#__devlens_content");
+  panel.querySelector("#__devlens_close").addEventListener("click", (event) => {
+    event.stopPropagation();
+    cleanup();
+  });
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
   }
 
-  // ---------- CSS rules that match the element ----------
-  function matchedRules(el) {
-    const out = [];
-    let blocked = 0;
-    const visit = (rules, src) => {
-      for (const r of rules) {
-        if (r.selectorText !== undefined && r.style) {
-          try { if (el.matches(r.selectorText)) out.push({ selector: r.selectorText, css: clip(r.style.cssText), src }); } catch { /* odd selector */ }
-        } else if (r.cssRules) {
-          if (r.media && !matchMedia(r.media.mediaText).matches) continue;
-          visit(r.cssRules, src);
-        }
+  function safeText(value, fallback = "Unknown") {
+    const text = String(value ?? "").trim();
+    return text || fallback;
+  }
+
+  function getElementName(el) {
+    if (!el || el.nodeType !== 1) return "element";
+    const tag = el.tagName.toLowerCase();
+    const id = el.id ? `#${el.id}` : "";
+    const classes = typeof el.className === "string"
+      ? el.className.split(/\s+/).filter(Boolean).slice(0, 3).map(c => `.${c}`).join("")
+      : "";
+    return `<${tag}${id}${classes}>`;
+  }
+
+  function getTextPreview(el) {
+    const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+    return text.length > 100 ? `${text.slice(0, 100)}…` : text;
+  }
+
+  function getDomPath(el) {
+    const parts = [];
+    let node = el;
+
+    while (node && node.nodeType === 1 && parts.length < 5) {
+      let part = node.tagName.toLowerCase();
+
+      if (node.id) {
+        part += `#${node.id}`;
+        parts.unshift(part);
+        break;
       }
-    };
-    for (const sheet of document.styleSheets) {
-      let rules;
-      try { rules = sheet.cssRules; } catch { blocked++; continue; } // cross-origin sheet
-      let src = 'inline <style>';
-      try { if (sheet.href) src = new URL(sheet.href).pathname.split('/').pop() || sheet.href; } catch { /* ignore */ }
-      visit(rules, src);
+
+      const classes = typeof node.className === "string"
+        ? node.className.split(/\s+/).filter(Boolean).slice(0, 2)
+        : [];
+
+      if (classes.length) part += `.${classes.join(".")}`;
+
+      let sibling = node;
+      let index = 1;
+
+      while ((sibling = sibling.previousElementSibling)) {
+        if (sibling.tagName === node.tagName) index++;
+      }
+
+      part += `:nth-of-type(${index})`;
+      parts.unshift(part);
+      node = node.parentElement;
     }
-    return { items: out, blocked };
+
+    return parts.join(" > ");
   }
 
-  // ---------- rule-based explanation ----------
-  function layoutLines(el, cs) {
-    const L = [];
-    const kids = el.children.length;
-    const d = cs.display;
-    if (d === 'none') L.push('Hidden: display is none, so it takes up no space.');
-    else if (d.includes('flex')) {
-      const dir = cs.flexDirection.startsWith('column') ? 'a column' : 'a row';
-      L.push(`Flex container: its ${kids} child${kids === 1 ? '' : 'ren'} are laid out in ${dir}${cs.flexWrap !== 'nowrap' ? ', wrapping onto new lines when space runs out' : ''}.`);
-      if (JUSTIFY[cs.justifyContent]) L.push(`Along the ${dir === 'a row' ? 'row' : 'column'}, children are ${JUSTIFY[cs.justifyContent]}.`);
-      if (ALIGN[cs.alignItems]) L.push(`Across that direction, children are ${ALIGN[cs.alignItems]}.`);
-      if (px(cs.rowGap) || px(cs.columnGap)) L.push(`Gap between children: ${cs.rowGap === cs.columnGap ? cs.rowGap : cs.rowGap + ' rows, ' + cs.columnGap + ' columns'}.`);
-    } else if (d.includes('grid')) {
-      const cols = cs.gridTemplateColumns.split(' ').filter(Boolean);
-      L.push(`Grid container: children are placed into a grid with ${cols.length} column${cols.length === 1 ? '' : 's'} (${clip(cs.gridTemplateColumns, 80)}).`);
-      if (px(cs.rowGap) || px(cs.columnGap)) L.push(`Gap between cells: ${cs.rowGap === cs.columnGap ? cs.rowGap : cs.rowGap + ' rows, ' + cs.columnGap + ' columns'}.`);
-    } else if (d === 'block') L.push('Block box: fills the available width and stacks vertically with its siblings.');
-    else if (d === 'inline') L.push("Inline box: flows within a line of text like a word. Width and height don't apply to it.");
-    else if (d === 'inline-block') L.push('Inline-block: flows like a word in a line, but you can set its width and height.');
-    else if (d === 'contents') L.push("display: contents — the box itself disappears and its children behave as if they were in its parent.");
-    else L.push(`display: ${d}.`);
-
-    const pos = cs.position;
-    if (pos === 'relative') L.push('Position relative: offsets nudge it from its normal spot, and it becomes the reference point for absolutely positioned children.');
-    else if (pos === 'absolute') L.push(`Position absolute: removed from normal flow and placed relative to <${label(posAncestor(el))}>. Siblings ignore it, so it can overlap them.`);
-    else if (pos === 'fixed') L.push('Position fixed: pinned to the browser window, so it stays put while the page scrolls.');
-    else if (pos === 'sticky') L.push(`Position sticky: scrolls normally until it reaches top: ${cs.top}, then sticks there.`);
-    if (pos !== 'static' && cs.zIndex !== 'auto') L.push(`z-index ${cs.zIndex}: higher numbers are drawn on top of lower ones.`);
-    if (cs.cssFloat && cs.cssFloat !== 'none') L.push(`Floated ${cs.cssFloat}: text and inline content wrap around it.`);
-    if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
-      const o = cs.overflowX === cs.overflowY ? cs.overflowX : `${cs.overflowX} / ${cs.overflowY}`;
-      L.push(`Overflow ${o}: content that doesn't fit is clipped or scrollable.`);
-    }
-    if (cs.transform !== 'none') L.push('A CSS transform is applied: it can move, scale or rotate the element without changing layout.');
-    if (parseFloat(cs.opacity) < 1) L.push(`Opacity ${cs.opacity}: partly see-through.`);
-
+  function getLayoutInfo(el, styles) {
     const parent = el.parentElement;
-    if (parent && cs.position !== 'absolute' && cs.position !== 'fixed') {
-      const pcs = getComputedStyle(parent);
-      if (pcs.display.includes('flex')) {
-        let s = `Flex item of <${label(parent)}>, so that parent decides how it is sized and placed.`;
-        if (parseFloat(cs.flexGrow) > 0) s += ` flex-grow ${cs.flexGrow}: it takes a share of leftover space.`;
-        if (cs.alignSelf !== 'auto') s += ` align-self ${cs.alignSelf} overrides the parent's alignment.`;
-        L.push(s);
-      } else if (pcs.display.includes('grid')) L.push(`Grid item of <${label(parent)}>, so that parent's grid decides where it goes.`);
-    }
-    return L;
-  }
+    const parentStyles = parent ? getComputedStyle(parent) : null;
 
-  function boxLines(el, cs) {
-    const r = el.getBoundingClientRect();
-    const L = [`Size: ${px(r.width)} × ${px(r.height)} px (box-sizing: ${cs.boxSizing}).`];
-    for (const [name, p, suf] of [['Padding', 'padding', ''], ['Margin', 'margin', ''], ['Border width', 'border', 'Width']]) {
-      const a = sides(cs, p, suf);
-      if (a.some(Boolean)) L.push(`${name}: ${fmtSides(a)}.`);
-    }
-    if (px(cs.borderTopLeftRadius)) L.push(`Rounded corners: ${cs.borderTopLeftRadius}.`);
-    if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') L.push(`Background colour: ${cs.backgroundColor}.`);
-    if (cs.boxShadow !== 'none') L.push('Has a box shadow.');
-    return L;
-  }
+    const result = {
+      display: styles.display,
+      position: styles.position,
+      flexDirection: styles.flexDirection,
+      justifyContent: styles.justifyContent,
+      alignItems: styles.alignItems,
+      gridTemplateColumns: styles.gridTemplateColumns,
+      parentDisplay: parentStyles?.display || null,
+      parentFlexDirection: parentStyles?.flexDirection || null
+    };
 
-  function textLines(el, cs) {
-    if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) return [];
-    const fam = cs.fontFamily.split(',')[0].replace(/["']/g, '').trim();
-    const L = [`Text: ${fam}, ${cs.fontSize}, weight ${cs.fontWeight}, colour ${cs.color}, line height ${cs.lineHeight}.`];
-    if (!['start', 'left'].includes(cs.textAlign)) L.push(`Text alignment: ${cs.textAlign}.`);
-    return L;
-  }
-
-  function behaviorLines(el, info) {
-    const L = [];
-    const t = el.tagName.toLowerCase();
-    if (t === 'a' && el.getAttribute('href')) {
-      L.push(`Link to ${clip(el.getAttribute('href'), 90)}${el.target === '_blank' ? ', opens in a new tab' : ''}.`);
-    }
-    if (t === 'button' || (t === 'input' && ['submit', 'button'].includes(el.type))) {
-      L.push(el.closest('form') && el.type !== 'button' ? 'Clicking submits its form (unless a handler stops it).' : 'Clicking runs whatever handler the page attached.');
-    }
-    if (t === 'form') L.push(`Form sending ${(el.method || 'get').toUpperCase()} to ${clip(el.getAttribute('action') || '(current page)', 80)}.`);
-    if (t === 'input') L.push(`Input of type ${el.type}${el.required ? ', required' : ''}${el.placeholder ? `, placeholder "${clip(el.placeholder, 40)}"` : ''}.`);
-    if (t === 'img') L.push(el.alt ? `Image with alt text "${clip(el.alt, 60)}".` : 'Image with no alt text (screen readers get nothing).');
-    if (el.getAttribute('role')) L.push(`ARIA role: ${el.getAttribute('role')}.`);
-    if (el.getAttribute('aria-label')) L.push(`ARIA label: ${clip(el.getAttribute('aria-label'), 60)}.`);
-    return L;
-  }
-
-  // ---------- panel rendering ----------
-  function section(title, lines) {
-    if (!lines.length) return null;
-    return h('div', {}, h('h4', { text: title }), ...lines.map((l) => h('p', { text: l })));
-  }
-
-  function renderPanel(el) {
-    const cs = getComputedStyle(el);
-    const info = probe(el);
-    const rules = matchedRules(el);
-    const layout = layoutLines(el, cs);
-    const t = el.tagName.toLowerCase();
-    const desc = TAGS[t] || `a <${t}> element`;
-    const summary = desc[0].toUpperCase() + desc.slice(1) + '. ' + (layout[0] || '');
-
-    const kids = [h('p', { class: 'summary', text: summary })];
-    const add = (n) => n && kids.push(n);
-    add(section('Layout and position', layout.slice(1)));
-    add(section('Size, spacing and look', boxLines(el, cs)));
-    add(section('Text', textLines(el, cs)));
-
-    // Behaviour + framework evidence
-    const beh = behaviorLines(el, info);
-    const runtime = [];
-    if (info.react) {
-      if (info.react.components.length) runtime.push(h('p', { text: 'React: rendered by ' + info.react.components.join(' ← ') + ' (nearest first).' }));
-      for (const hd of info.react.handlers) runtime.push(h('p', { text: `${hd.event} handler (${hd.name}):` }), h('pre', { text: hd.src }));
-    }
-    if (info.vue) runtime.push(h('p', { text: `Vue ${info.vue.version}: component chain ${info.vue.components.join(' ← ') || '(unnamed)'}.` }));
-    for (const hd of info.inline || []) runtime.push(h('p', { text: `Inline ${hd.event} handler:` }), h('pre', { text: hd.src }));
-    if (beh.length || runtime.length) {
-      kids.push(h('div', {}, h('h4', { text: 'Behavior' }), ...beh.map((l) => h('p', { text: l })), ...runtime));
-    }
-    if (!info.react && !info.vue && !(info.inline || []).length) {
-      kids.push(h('p', { class: 'note', text: 'No framework or inline handler found. The page may still attach behavior with addEventListener, which this version cannot see.' }));
+    let explanation = "The element uses normal document flow.";
+    if (styles.position === "fixed") {
+      explanation = "The element is fixed to the viewport and stays in place while the page scrolls.";
+    } else if (styles.position === "sticky") {
+      explanation = "The element uses sticky positioning, so it can remain attached to the viewport after reaching its scroll threshold.";
+    } else if (styles.position === "absolute") {
+      explanation = "The element is absolutely positioned relative to its containing block.";
+    } else if (styles.display === "flex") {
+      explanation = "The element itself uses Flexbox to arrange its children.";
+    } else if (styles.display === "grid") {
+      explanation = "The element itself uses CSS Grid to arrange its children.";
+    } else if (parentStyles?.display === "flex") {
+      explanation = "The parent uses Flexbox, so this element is being positioned as a flex item.";
+    } else if (parentStyles?.display === "grid") {
+      explanation = "The parent uses CSS Grid, so this element is being positioned as a grid item.";
     }
 
-    // Matched CSS rules
-    const shown = rules.items.slice(-8);
-    const inlineStyle = el.getAttribute('style');
-    const ruleNodes = [];
-    if (inlineStyle) ruleNodes.push(h('div', { class: 'rule' }, h('b', { text: 'style attribute' }), h('pre', { text: clip(inlineStyle) })));
-    for (const r of shown) ruleNodes.push(h('div', { class: 'rule' }, h('b', { text: r.selector }), h('small', { text: r.src }), h('pre', { text: r.css })));
-    kids.push(h('div', {}, h('h4', { text: `CSS rules that match (${shown.length} of ${rules.items.length}, later ones usually win)` }), ...ruleNodes));
-    if (rules.blocked) kids.push(h('p', { class: 'note', text: `${rules.blocked} stylesheet${rules.blocked === 1 ? '' : 's'} from other sites can't be read by extensions, so some matching rules may be missing.` }));
-
-    // AI explanation
-    const out = h('div', { class: 'ai-out' });
-    const btn = h('button', { class: 'ai', text: 'Explain with AI' });
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      out.textContent = 'Thinking…';
-      const payload = {
-        page: location.hostname,
-        html: clip(el.outerHTML, 1500),
-        rule_based_notes: [...layout, ...boxLines(el, cs)],
-        matched_css: shown,
-        runtime: info
-      };
-      try {
-        const res = await chrome.runtime.sendMessage({ type: 'ai', payload });
-        out.textContent = res.ok ? res.text : res.error;
-        if (!res.ok && /API key/.test(res.error)) {
-          out.append(' ', h('button', { class: 'link', text: 'Open options', onclick: () => chrome.runtime.sendMessage({ type: 'options' }) }));
-        }
-      } catch (e) { out.textContent = 'Could not reach the extension: ' + e.message; }
-      btn.disabled = false;
-    });
-    kids.push(h('div', {}, h('h4', { text: 'Deeper explanation' }), btn,
-      h('p', { class: 'note', text: "Sends this element's HTML, matching CSS and handler code to Google's Gemini API." }), out));
-
-    const close = h('button', { class: 'x', text: '×', 'aria-label': 'Close panel', onclick: unlock });
-    panel.replaceChildren(
-      h('div', { class: 'head' }, h('span', { class: 'name', text: label(el) }), close),
-      h('div', { class: 'body' }, ...kids)
-    );
-    const r = el.getBoundingClientRect();
-    const onRight = r.left + r.width / 2 > innerWidth / 2; // keep the panel off the element
-    panel.style.left = onRight ? '16px' : 'auto';
-    panel.style.right = onRight ? 'auto' : '16px';
-    panel.style.display = 'block';
+    return { result, explanation };
   }
 
-  // ---------- highlighting ----------
-  function place(node, el) {
-    const r = el.getBoundingClientRect();
-    Object.assign(node.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
-  }
+  function collectEvents(el) {
+    const events = [];
 
-  function highlight(el, withTag) {
-    place(box, el);
-    const p = el.parentElement;
-    const pd = p ? getComputedStyle(p).display : '';
-    if (p && p !== document.body && p !== document.documentElement && /flex|grid/.test(pd)) place(parentBox, p);
-    else parentBox.style.display = 'none';
-    if (!withTag) { tag.style.display = 'none'; return; }
-    const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    const kind = /flex|grid/.test(cs.display) ? ' · ' + cs.display : '';
-    tag.textContent = `${label(el)} · ${px(r.width)}×${px(r.height)}${kind}  (click to explain)`;
-    tag.style.display = 'block';
-    tag.style.left = Math.max(4, Math.min(r.left, innerWidth - 300)) + 'px';
-    tag.style.top = (r.bottom + 34 > innerHeight ? Math.max(4, r.top - 28) : r.bottom + 6) + 'px';
-  }
-
-  function clearHighlights() {
-    [parentBox, box, tag].forEach((n) => (n.style.display = 'none'));
-  }
-
-  function lock(el) {
-    locked = el;
-    highlight(el, false);
-    renderPanel(el);
-  }
-
-  function unlock() {
-    locked = null;
-    panel.style.display = 'none';
-    panel.replaceChildren();
-    clearHighlights();
-  }
-
-  // ---------- events ----------
-  const isOwn = (e) => e.target === host || host.contains(e.target);
-
-  function onOver(e) {
-    if (isOwn(e) || locked) return;
-    lastTarget = e.target;
-    if (raf) return;
-    raf = requestAnimationFrame(() => { // at most once per frame
-      raf = 0;
-      if (lastTarget && lastTarget !== hovered && lastTarget.nodeType === 1) {
-        hovered = lastTarget;
-        highlight(hovered, true);
+    // Chrome/DevTools internals are not reliably available to page scripts.
+    // Keep this conservative rather than claiming an event was found when it was not.
+    for (const attr of Array.from(el.attributes || [])) {
+      if (/^on[a-z]+$/i.test(attr.name)) {
+        events.push({
+          type: attr.name.slice(2).toLowerCase(),
+          source: "inline handler"
+        });
       }
+    }
+
+    return events;
+  }
+
+  function collectFrameworkInfo(el) {
+    const info = {
+      framework: "Not detected",
+      component: null,
+      confidence: "Unknown"
+    };
+
+    try {
+      const keys = Object.keys(el);
+
+      const reactKey = keys.find(k =>
+        k.startsWith("__reactFiber$") ||
+        k.startsWith("__reactInternalInstance$")
+      );
+
+      const reactPropsKey = keys.find(k => k.startsWith("__reactProps$"));
+
+      if (reactKey || reactPropsKey) {
+        info.framework = "React";
+        info.confidence = "Detected";
+
+        const fiber = reactKey ? el[reactKey] : null;
+        let current = fiber;
+        let depth = 0;
+
+        while (current && depth < 12) {
+          const type = current.type;
+
+          if (typeof type === "function") {
+            info.component = type.displayName || type.name || null;
+            if (info.component) break;
+          }
+
+          if (typeof type === "string" && current.elementType && typeof current.elementType === "function") {
+            info.component = current.elementType.displayName || current.elementType.name || null;
+            if (info.component) break;
+          }
+
+          current = current.return;
+          depth++;
+        }
+      }
+
+      const vueKey = keys.find(k =>
+        k.startsWith("__vueParentComponent") ||
+        k.startsWith("__vue_app__")
+      );
+
+      if (vueKey && info.framework === "Not detected") {
+        info.framework = "Vue";
+        info.confidence = "Detected";
+      }
+    } catch {
+      // Intentionally keep framework information conservative.
+    }
+
+    return info;
+  }
+
+  function analyzeElement(el) {
+    const rect = el.getBoundingClientRect();
+    const styles = getComputedStyle(el);
+    const layout = getLayoutInfo(el, styles);
+    const events = collectEvents(el);
+    const framework = collectFrameworkInfo(el);
+
+    const htmlAttributes = {};
+    for (const attr of Array.from(el.attributes || []).slice(0, 20)) {
+      htmlAttributes[attr.name] = attr.value;
+    }
+
+    const detected = [
+      ["Element", getElementName(el)],
+      ["Size", `${Math.round(rect.width)} × ${Math.round(rect.height)} px`],
+      ["Display", styles.display],
+      ["Position", styles.position],
+      ["Font", `${styles.fontSize} ${styles.fontFamily.split(",")[0]}`],
+      ["Color", styles.color],
+      ["Background", styles.backgroundColor],
+      ["Padding", styles.padding],
+      ["Margin", styles.margin],
+      ["Border radius", styles.borderRadius]
+    ];
+
+    if (framework.framework !== "Not detected") {
+      detected.push(["Framework", framework.framework]);
+      if (framework.component) detected.push(["Component", framework.component]);
+    }
+
+    if (events.length) {
+      detected.push(["Events", events.map(e => e.type).join(", ")]);
+    }
+
+    const inferred = [];
+
+    if (layout.explanation) inferred.push(layout.explanation);
+
+    if (el.tagName === "BUTTON" || el.getAttribute("role") === "button") {
+      inferred.push("This is intended to behave as an interactive control.");
+    }
+
+    if (el.tagName === "A" && el.getAttribute("href")) {
+      inferred.push("This element is a link and its destination is available from the href attribute.");
+    }
+
+    if (styles.transition !== "all 0s ease 0s" && styles.transition !== "none") {
+      inferred.push("A CSS transition is present, so some visual changes may animate rather than change instantly.");
+    }
+
+    if (styles.cursor === "pointer") {
+      inferred.push("The pointer cursor suggests this element is intended to be interactive.");
+    }
+
+    const unknown = [
+      "The exact business logic behind this element cannot be determined from the DOM and computed CSS alone."
+    ];
+
+    if (!events.length && (el.tagName === "BUTTON" || el.tagName === "A")) {
+      unknown.push("No inline event handler was detected. Framework or externally registered event listeners may still exist.");
+    }
+
+    return {
+      element: getElementName(el),
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      className: typeof el.className === "string" ? el.className : null,
+      text: getTextPreview(el),
+      path: getDomPath(el),
+      attributes: htmlAttributes,
+      layout,
+      detected,
+      inferred,
+      unknown,
+      events,
+      framework,
+      html: el.outerHTML.length > 2000 ? `${el.outerHTML.slice(0, 2000)}…` : el.outerHTML
+    };
+  }
+
+  function moveHighlight(el) {
+    const rect = el.getBoundingClientRect();
+
+    highlight.style.display = "block";
+    highlight.style.left = `${rect.left}px`;
+    highlight.style.top = `${rect.top}px`;
+    highlight.style.width = `${rect.width}px`;
+    highlight.style.height = `${rect.height}px`;
+
+    const tooltipX = Math.min(
+      Math.max(8, rect.left),
+      window.innerWidth - 380
+    );
+
+    const tooltipY = rect.bottom + 8 < window.innerHeight
+      ? rect.bottom + 8
+      : Math.max(8, rect.top - 48);
+
+    tooltip.style.left = `${tooltipX}px`;
+    tooltip.style.top = `${tooltipY}px`;
+  }
+
+  function showTooltip(el) {
+    tooltip.style.display = "block";
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(getElementName(el))}</strong>
+      <span style="color:${COLORS.muted};"> · click to lock</span>
+    `;
+  }
+
+  function hideTooltip() {
+    tooltip.style.display = "none";
+  }
+
+  function renderAnalysis(analysis) {
+    const detectedRows = analysis.detected.map(([key, value]) => `
+      <div class="devlens-row">
+        <span class="devlens-key">${escapeHtml(key)}</span>
+        <span class="devlens-value">${escapeHtml(value)}</span>
+      </div>
+    `).join("");
+
+    const inferredRows = analysis.inferred.length
+      ? analysis.inferred.map(item => `
+          <div style="margin-bottom:8px;" class="devlens-explanation">
+            ${escapeHtml(item)}
+          </div>
+        `).join("")
+      : `<div class="devlens-muted">No strong inference available.</div>`;
+
+    const unknownRows = analysis.unknown.map(item => `
+      <div style="margin-bottom:8px;" class="devlens-explanation">
+        ${escapeHtml(item)}
+      </div>
+    `).join("");
+
+    const attributes = Object.entries(analysis.attributes)
+      .map(([key, value]) => `${key}="${value}"`)
+      .join(" ");
+
+    content.innerHTML = `
+      <div class="devlens-section">
+        <div class="devlens-section-head">🧠 ${escapeHtml(analysis.element)}</div>
+        <div class="devlens-section-body">
+          ${analysis.text ? `<div class="devlens-muted" style="margin-bottom:8px;">“${escapeHtml(analysis.text)}”</div>` : ""}
+          <div class="devlens-row">
+            <span class="devlens-key">DOM path</span>
+            <span class="devlens-value">${escapeHtml(analysis.path)}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="devlens-section">
+        <div class="devlens-section-head">
+          <span class="devlens-badge devlens-detected">DETECTED</span>
+          What the page tells us
+        </div>
+        <div class="devlens-section-body">${detectedRows}</div>
+      </div>
+
+      <div class="devlens-section">
+        <div class="devlens-section-head">
+          <span class="devlens-badge devlens-inferred">INFERRED</span>
+          What this likely means
+        </div>
+        <div class="devlens-section-body">${inferredRows}</div>
+      </div>
+
+      <div class="devlens-section">
+        <div class="devlens-section-head">
+          <span class="devlens-badge devlens-unknown">UNKNOWN</span>
+          What we cannot safely know
+        </div>
+        <div class="devlens-section-body">${unknownRows}</div>
+      </div>
+
+      <div class="devlens-section">
+        <div class="devlens-section-head">HTML</div>
+        <div class="devlens-section-body">
+          <pre class="devlens-code">${escapeHtml(analysis.html)}</pre>
+          ${attributes ? `<div class="devlens-muted" style="margin-top:8px;">Attributes: ${escapeHtml(attributes)}</div>` : ""}
+        </div>
+      </div>
+
+      <div class="devlens-section">
+        <div class="devlens-section-head">📐 Layout explanation</div>
+        <div class="devlens-section-body">
+          ${escapeHtml(analysis.layout.explanation)}
+        </div>
+      </div>
+
+      <button class="devlens-button" id="__devlens_ai_button">
+        ✨ Explain this element with AI
+      </button>
+    `;
+
+    const aiButton = content.querySelector("#__devlens_ai_button");
+    aiButton?.addEventListener("click", () => {
+      requestAIExplanation(analysis);
     });
   }
 
-  function onClick(e) {
-    if (isOwn(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-    lock(e.target);
-  }
+  async function requestAIExplanation(analysis) {
+    const aiButton = content.querySelector("#__devlens_ai_button");
+    if (aiButton) {
+      aiButton.disabled = true;
+      aiButton.textContent = "✨ Generating explanation…";
+    }
 
-  const swallow = (e) => { if (!isOwn(e)) e.stopPropagation(); };
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "DEVLENS_EXPLAIN",
+        payload: {
+          element: analysis.element,
+          html: analysis.html,
+          css: analysis.detected,
+          layout: analysis.layout,
+          framework: analysis.framework,
+          events: analysis.events,
+          inferred: analysis.inferred,
+          unknown: analysis.unknown
+        }
+      });
 
-  function onKey(e) {
-    if (e.key !== 'Escape') return;
-    e.stopPropagation();
-    if (locked) unlock(); else deactivate();
-  }
+      const section = document.createElement("div");
+      section.className = "devlens-section";
+      section.innerHTML = `
+        <div class="devlens-section-head">✨ AI explanation</div>
+        <div class="devlens-section-body">
+          <div class="devlens-explanation">${escapeHtml(response?.text || "AI explanation was not available.")}</div>
+        </div>
+      `;
 
-  function refresh() {
-    if (locked) {
-      if (!locked.isConnected) return unlock();
-      highlight(locked, false);
-    } else if (hovered) {
-      if (!hovered.isConnected) { hovered = null; clearHighlights(); } else highlight(hovered, true);
+      content.insertBefore(section, aiButton);
+      aiButton.remove();
+    } catch (error) {
+      if (aiButton) {
+        aiButton.disabled = false;
+        aiButton.textContent = "✨ Explain this element with AI";
+      }
+
+      const section = document.createElement("div");
+      section.className = "devlens-section";
+      section.innerHTML = `
+        <div class="devlens-section-head">AI explanation</div>
+        <div class="devlens-section-body">
+          <div class="devlens-muted">
+            AI explanation could not be generated. The detected and inferred information above is still available.
+          </div>
+        </div>
+      `;
+
+      content.insertBefore(section, aiButton);
     }
   }
 
-  function notify() {
-    try { chrome.runtime.sendMessage({ type: 'state', on: active }); } catch { /* extension reloaded */ }
+  function selectElement(el) {
+    if (!el || el === panel || panel.contains(el)) return;
+
+    state.currentElement = el;
+    state.currentAnalysis = analyzeElement(el);
+    state.locked = true;
+
+    hideTooltip();
+    moveHighlight(el);
+    renderAnalysis(state.currentAnalysis);
   }
 
-  function activate() {
-    active = true;
-    document.documentElement.appendChild(host);
-    document.addEventListener('mouseover', onOver, true);
-    document.addEventListener('click', onClick, true);
-    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup']) document.addEventListener(t, swallow, true);
-    document.addEventListener('keydown', onKey, true);
-    addEventListener('scroll', refresh, true);
-    addEventListener('resize', refresh);
-    notify();
+  function cleanup() {
+    state.locked = false;
+    state.currentElement = null;
+    state.currentAnalysis = null;
+    window.__devLensInjected = false;
+
+    style.remove();
+    highlight.remove();
+    tooltip.remove();
+    panel.remove();
+
+    document.removeEventListener("mousemove", onMouseMove, true);
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("resize", onResize, true);
   }
 
-  function deactivate() {
-    active = false;
-    unlock();
-    hovered = null;
-    document.removeEventListener('mouseover', onOver, true);
-    document.removeEventListener('click', onClick, true);
-    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup']) document.removeEventListener(t, swallow, true);
-    document.removeEventListener('keydown', onKey, true);
-    removeEventListener('scroll', refresh, true);
-    removeEventListener('resize', refresh);
-    host.remove();
-    notify();
+  function onMouseMove(event) {
+    if (state.locked) return;
+
+    const el = event.target;
+
+    if (
+      !el ||
+      el === panel ||
+      panel.contains(el) ||
+      el === highlight ||
+      el === tooltip
+    ) {
+      return;
+    }
+
+    if (el.nodeType !== 1) return;
+
+    moveHighlight(el);
+    showTooltip(el);
+    renderAnalysis(analyzeElement(el));
   }
 
-  const toggle = () => (active ? deactivate() : activate());
-  window.__hoverExplainer = { toggle };
-  activate();
+  function onClick(event) {
+    if (
+      event.target === panel ||
+      panel.contains(event.target) ||
+      event.target === highlight ||
+      event.target === tooltip
+    ) {
+      return;
+    }
+
+    if (state.locked) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+
+    selectElement(event.target);
+  }
+
+  function onScroll() {
+    if (state.currentElement && state.locked) {
+      moveHighlight(state.currentElement);
+    }
+  }
+
+  function onResize() {
+    if (state.currentElement) {
+      moveHighlight(state.currentElement);
+    }
+  }
+
+  document.addEventListener("mousemove", onMouseMove, true);
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("scroll", onScroll, true);
+  window.addEventListener("resize", onResize);
+
+  // Initial state.
+  renderAnalysis({
+    element: "No element selected",
+    text: "",
+    path: "—",
+    detected: [["Status", "Move your cursor over the page"]],
+    inferred: ["Hover an element to see what DevLens can detect and what it can infer."],
+    unknown: ["DevLens will explicitly mark information it cannot safely determine."],
+    attributes: {},
+    html: "<hover an element>",
+    layout: { explanation: "Waiting for an element." }
+  });
 })();

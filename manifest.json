@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hover Explainer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hover any element on a page to see how it is built and how it works, in plain language.",
   "permissions": [
     "activeTab",
