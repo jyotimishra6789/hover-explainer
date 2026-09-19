@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Hover Explainer",
+  "version": "0.1.0",
+  "description": "Hover any element on a page to see how it is built and how it works, in plain language.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://api.anthropic.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Toggle Hover Explainer (Alt+Shift+E)" },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+Shift+E" },
+      "description": "Toggle explain mode on this tab"
+    }
+  },
+  "options_page": "options.html"
+}
