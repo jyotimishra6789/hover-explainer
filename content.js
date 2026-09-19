@@ -605,7 +605,7 @@
 
     try {
       const response = await chrome.runtime.sendMessage({
-        type: "DEVLENS_EXPLAIN",
+        type: "ai",
         payload: {
           element: analysis.element,
           html: analysis.html,
@@ -617,6 +617,9 @@
           unknown: analysis.unknown
         }
       });
+
+      // background.js answers { ok, text } or { ok:false, error }. Show the real error instead of a generic one.
+      if (!response?.ok) throw new Error(response?.error || "No response from the extension background script.");
 
       const section = document.createElement("div");
       section.className = "devlens-section";
@@ -641,7 +644,8 @@
         <div class="devlens-section-head">AI explanation</div>
         <div class="devlens-section-body">
           <div class="devlens-muted">
-            AI explanation could not be generated. The detected and inferred information above is still available.
+            AI explanation could not be generated: ${escapeHtml(error?.message || String(error))}<br>
+            The detected and inferred information above is still available.
           </div>
         </div>
       `;
