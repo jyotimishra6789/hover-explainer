@@ -292,7 +292,7 @@
       btn.disabled = false;
     });
     kids.push(h('div', {}, h('h4', { text: 'Deeper explanation' }), btn,
-      h('p', { class: 'note', text: "Sends this element's HTML, matching CSS and handler code to Anthropic." }), out));
+      h('p', { class: 'note', text: "Sends this element's HTML, matching CSS and handler code to Google's Gemini API." }), out));
 
     const close = h('button', { class: 'x', text: '×', 'aria-label': 'Close panel', onclick: unlock });
     panel.replaceChildren(
